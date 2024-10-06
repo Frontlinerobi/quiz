@@ -1,0 +1,546 @@
+<?php
+require 'vendor/autoload.php'; // Ensure Composer's autoload is included
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
+include 'config.php';
+session_start();
+
+if (!isset($_SESSION['user_id'])) {
+    header('Location: login.php');
+    exit();
+}
+
+date_default_timezone_set('Asia/Kolkata'); // Set timezone to Asia/Kolkata
+
+$current_time = new DateTime('now', new DateTimeZone('Asia/Kolkata'));
+$start_time = new DateTime('14:00:00', new DateTimeZone('Asia/Kolkata'));
+$end_time = new DateTime('23:59:59', new DateTimeZone('Asia/Kolkata'));
+
+if ($current_time < $start_time || $current_time > $end_time) {
+    $message = "Today Class will start at 14:00";
+    
+    if ($current_time < $start_time) {
+        $countdown = $start_time->getTimestamp() - $current_time->getTimestamp();
+    } else {
+        $countdown = $end_time->getTimestamp() - $current_time->getTimestamp();
+    }
+
+    echo "<!DOCTYPE html>
+<html lang='en'>
+<head>
+    <meta charset='UTF-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>Class Not Started</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background-color: #f0f0f0;
+        }
+        .message {
+            font-size: 26px;
+            font-weight: bold;
+            margin-bottom: 60px; 
+            text-align: center;
+        }
+        .countdown {
+            font-size: 40px;
+            font-weight: bold;
+            color: #e74c3c;
+            text-shadow: 0 0 10px rgba(231, 76, 60, 0.6);
+            animation: floating 3s ease-in-out infinite;
+            position: absolute;
+            top: 20px;
+        }
+        @keyframes floating {
+            0% { transform: translateY(0); }
+            50% { transform: translateY(-10px); }
+            100% { transform: translateY(0); }
+        }
+    </style>
+</head>
+<body>
+    <div class='message'>
+        <span>Today</span> <span>Class</span> <span>will</span> <span>start</span> <span>at</span> <span>14:00 IST </span>
+    </div>
+    <div class='countdown' id='countdown'></div>
+    <script>
+        var countdown = $countdown;
+        function updateCountdown() {
+            var hours = Math.floor(countdown / 3600);
+            var minutes = Math.floor((countdown % 3600) / 60);
+            var seconds = countdown % 60;
+            
+            document.getElementById('countdown').innerHTML = hours.toString().padStart(2, '0') + ':' +
+                                                            minutes.toString().padStart(2, '0') + ':' +
+                                                            seconds.toString().padStart(2, '0');
+            if (countdown > 0) {
+                countdown--;
+                setTimeout(updateCountdown, 1000);
+            }
+        }
+        updateCountdown();
+    </script>
+</body>
+</html>";
+    exit();
+}
+
+
+$conn = new mysqli('sdb-u.hosting.stackcp.net', 'quiz-4249', 'Quiz@2024', 'h2oquiz-323131640c');
+
+if ($conn->connect_error) {
+    die("Database connection failed: " . $conn->connect_error);
+}
+
+mysqli_set_charset($conn, 'utf8mb4');
+
+$user_id = $_SESSION['user_id'];
+$sql = "SELECT name FROM users WHERE id = ?";
+$stmt = $conn->prepare($sql);
+$stmt->bind_param('i', $user_id);
+$stmt->execute();
+$result = $stmt->get_result();
+
+if ($result->num_rows > 0) {
+    $user = $result->fetch_assoc();
+    $username = $user['name'];
+
+    // Get today's date
+    $today = date('Y-m-d');
+
+    // Get the user's score for today
+    $score_query = "SELECT COUNT(*) AS score 
+                    FROM answers 
+                    JOIN questions ON answers.question_id = questions.id 
+                    WHERE user_id = ? 
+                    AND selected_option = questions.correct_option 
+                    AND DATE(answers.response_date_time) = ?";
+    $score_stmt = $conn->prepare($score_query);
+    $score_stmt->bind_param('is', $user_id, $today); // 'is' binds integer and string
+    $score_stmt->execute();
+    $score_result = $score_stmt->get_result();
+    $score = $score_result->fetch_assoc()['score'];
+
+} else {
+    die("<p>User not found. Please log in again.</p>");
+}
+
+// Initialize or retrieve question_ids from session
+if (!isset($_SESSION['question_ids'])) {
+    // Fetch all questions for today
+    $sql = "SELECT q.id 
+            FROM questions q
+            WHERE DATE(q.submission_date) = ?
+            ORDER BY q.id LIMIT 300";
+    
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param('s', $today);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    
+    $question_ids = [];
+    while ($row = $result->fetch_assoc()) {
+        $question_ids[] = $row['id'];
+    }
+    
+    $_SESSION['question_ids'] = $question_ids;
+} else {
+    $question_ids = $_SESSION['question_ids'];
+}
+
+$total_questions = count($question_ids);
+
+// Get current question number
+$current_question_number = isset($_GET['q']) ? (int)$_GET['q'] : 1;
+
+// Ensure current_question_number is within bounds
+if ($current_question_number < 1 || $current_question_number > $total_questions) {
+    header("Location: final_result.php");
+    exit();
+}
+
+$current_question_id = $question_ids[$current_question_number - 1];
+
+// Fetch current question details
+$sql = "SELECT * FROM questions WHERE id = ?";
+$stmt = $conn->prepare($sql);
+$stmt->bind_param('i', $current_question_id);
+$stmt->execute();
+$result = $stmt->get_result();
+$row = $result->fetch_assoc();
+
+$question_text = $row['question_text'];
+$option_a = $row['option_a'];
+$option_b = $row['option_b'];
+$option_c = $row['option_c'];
+$option_d = $row['option_d'];
+$correct_option = $row['correct_option'];
+
+$feedback_message = "";
+$feedback_class = "";
+
+// Handle form submission
+if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+    $selected_option = $_POST['option'];
+
+    $response_check_sql = "SELECT COUNT(*) AS count FROM answers WHERE user_id = ? AND question_id = ?";
+    $response_check_stmt = $conn->prepare($response_check_sql);
+    $response_check_stmt->bind_param('ii', $user_id, $current_question_id);
+    $response_check_stmt->execute();
+    $response_check_result = $response_check_stmt->get_result();
+    $response_check_count = $response_check_result->fetch_assoc()['count'];
+
+    if ($response_check_count > 0) {
+        $feedback_message = "You have already submitted a response for this question.";
+        $feedback_class = "feedback-incorrect";
+    } else {
+        $sql = "INSERT INTO answers (user_id, question_id, selected_option, response_date_time) VALUES (?, ?, ?, ?)";
+        $stmt = $conn->prepare($sql);
+        $response_date_time = date('Y-m-d H:i:s');
+        $stmt->bind_param('iiss', $user_id, $current_question_id, $selected_option, $response_date_time);
+        $stmt->execute();
+
+        if ($selected_option === $correct_option) {
+            $feedback_message = "Congratulations, you are correct!";
+            $feedback_class = "feedback-correct";
+        } else {
+            $feedback_message = "Sorry, your answer was wrong. The correct answer is: $correct_option";
+            $feedback_class = "feedback-incorrect";
+        }
+    }
+
+    // Redirect to next question
+    header("Location: quiz.php?q=" . ($current_question_number + 1) . "&feedback=" . urlencode($feedback_message) . "&feedback_class=" . urlencode($feedback_class));
+    exit();
+}
+
+// Handle timeout
+if (isset($_GET['timeout'])) {
+    $feedback_message = "Time out for this question. Moving to the next question.";
+    $feedback_class = "feedback-incorrect";
+}
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quiz</title>
+    <style>
+        /* Existing CSS */
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .header h3 {
+            margin: 0;
+            color: #333;
+        }
+        .header h4 {
+            margin: 0;
+            color: #666;
+        }
+        .quiz-container {
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 600px;
+            padding: 20px;
+            margin: 20px 0;
+            box-sizing: border-box;
+        }
+        h2 {
+            color: #3498db;
+            text-align: center;
+            font-weight: bold;
+            font-size: 1.5em;
+        }
+        .question-text {
+            font-size: 1.2em;
+            color: #2ecc71;
+            margin-bottom: 20px;
+            text-align: center;
+            font-weight: bold;
+        }
+        .options {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .options li {
+            margin-bottom: 10px;
+            padding: 15px;
+            border-radius: 5px;
+            transition: background-color 0.3s ease;
+            cursor: pointer;
+            text-align: center;
+            color: #333;
+            border: 1px solid #ddd;
+            font-weight: bold;
+            font-size: 1em;
+        }
+        .options li.correct {
+            background-color: #28a745;
+            color: #fff;
+        }
+        .options li.wrong {
+            background-color: #dc3545;
+            color: #fff;
+        }
+        .options li:hover {
+            background-color: #e9ecef;
+        }
+        .feedback {
+            text-align: center;
+            margin: 20px 0;
+            font-size: 1.2em;
+            color: #333;
+        }
+        .feedback-correct {
+            color: #28a745;
+        }
+        .feedback-incorrect {
+            color: #dc3545;
+        }
+        .timer-container {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .timer {
+            font-size: 1.5em;
+            color: #e74c3c;
+        }
+        .buttons {
+            display: flex;
+            justify-content: center; /* Changed to center to align buttons horizontally */
+            align-items: center;
+            margin-top: 20px;
+        }
+        .buttons button {
+            padding: 10px 20px;
+            font-size: 1em;
+            color: #fff;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 0 5px; /* Adjusted margin for better spacing */
+        }
+        .buttons .previous {
+            background-color: #007bff;
+        }
+        .buttons .next {
+            background-color: #28a745;
+        }
+        .buttons .finish {
+            background-color: #dc3545;
+        }
+
+        /* Added CSS for 50-50 Button */
+        .buttons .fiftyFifty {
+            background-color: #ffc107; /* Amber color */
+            color: #fff;
+        }
+
+        .buttons .fiftyFifty:disabled {
+            background-color: #e0a800; /* Darker amber when disabled */
+            cursor: not-allowed;
+        }
+
+        /* CSS for Disabled Options */
+        .disabled-option {
+            background-color: #f8d7da !important; /* Light red background */
+            color: #721c24 !important; /* Dark red text */
+            cursor: not-allowed;
+            pointer-events: none; /* Disable click events */
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h3>Welcome, <?php echo htmlspecialchars($username); ?></h3>
+        <h4>Your Score for Today: <?php echo $score; ?> / <?php echo $total_questions; ?></h4>
+    </div>
+    <div class="quiz-container">
+        <div class="timer-container">
+            <div>Time left:</div>
+            <div class="timer" id="timer">60</div>
+        </div>
+        <h2>Question <?php echo $current_question_number; ?> of <?php echo $total_questions; ?></h2>
+        <div class="question-text"><?php echo htmlspecialchars($question_text); ?></div>
+        <form id="quizForm" method="post">
+            <ul class="options">
+                <li id="optionA" onclick="selectOption('A', '<?php echo $correct_option; ?>')">A. <?php echo htmlspecialchars($option_a); ?></li>
+                <li id="optionB" onclick="selectOption('B', '<?php echo $correct_option; ?>')">B. <?php echo htmlspecialchars($option_b); ?></li>
+                <li id="optionC" onclick="selectOption('C', '<?php echo $correct_option; ?>')">C. <?php echo htmlspecialchars($option_c); ?></li>
+                <li id="optionD" onclick="selectOption('D', '<?php echo $correct_option; ?>')">D. <?php echo htmlspecialchars($option_d); ?></li>
+            </ul>
+            <input type="hidden" name="option" id="optionInput">
+        </form>
+        <div class="feedback <?php echo $feedback_class; ?>"><?php echo $feedback_message; ?></div>
+        <div class="buttons">
+            <?php if ($current_question_number > 1): ?>
+                <button class="previous" onclick="window.location.href='quiz.php?q=<?php echo $current_question_number - 1; ?>'">Previous</button>
+            <?php endif; ?>
+
+            <!-- 50-50 Button -->
+            <button class="fiftyFifty" id="fiftyFiftyBtn" onclick="handleFiftyFifty()">50-50</button>
+
+            <?php if ($current_question_number < $total_questions): ?>
+                <button class="next" onclick="window.location.href='quiz.php?q=<?php echo $current_question_number + 1; ?>'">Next</button>
+            <?php else: ?>
+                <button class="finish" onclick="window.location.href='final_result.php'">Finish Quiz</button>
+            <?php endif; ?>
+        </div>
+    </div>
+
+    <script>
+    var hasSubmitted = false;
+    var timeLimit = 60; // Time limit in seconds
+    var countdownElement = document.getElementById('timer');
+    var timer;
+
+    // Audio files
+    var countdownAudio = new Audio('https://h2opublicschool.co.in/quiz/media/tictic.mp3');
+    var correctAudio = new Audio('http://h2opublicschool.co.in/quiz/media/sothik.mp3');
+    var incorrectAudio = new Audio('http://h2opublicschool.co.in/quiz/media/bhul.mp3');
+
+    // Define the correct option using PHP
+    var correctOption = '<?php echo $correct_option; ?>';
+    var currentQuestionNumber = <?php echo $current_question_number; ?>;
+
+    function startTimer() {
+        var timeRemaining = timeLimit;
+        countdownElement.textContent = timeRemaining;
+
+        // Start playing the countdown sound
+        countdownAudio.loop = true;
+        countdownAudio.play();
+
+        timer = setInterval(function() {
+            timeRemaining--;
+            countdownElement.textContent = timeRemaining;
+
+            if (timeRemaining <= 0) {
+                clearInterval(timer);
+                countdownAudio.pause(); // Stop countdown sound when time is up
+                handleTimeout();
+            }
+        }, 1000);
+    }
+
+    function handleTimeout() {
+        if (!hasSubmitted) {
+            var feedback = document.querySelector('.feedback');
+            feedback.textContent = "Time out for this question. Moving to the next question.";
+            feedback.className = 'feedback feedback-incorrect';
+
+            countdownAudio.pause(); // Stop countdown sound
+            setTimeout(function() {
+                window.location.href = 'quiz.php?q=' + (currentQuestionNumber + 1) + '&timeout=true';
+            }, 6000);
+        }
+    }
+
+    function selectOption(option, correctOptionParam) {
+        if (hasSubmitted) {
+            alert("You have already submitted a response for this question.");
+            return;
+        }
+
+        document.getElementById('optionInput').value = option;
+
+        // Stop the countdown timer and sound
+        countdownAudio.pause();
+        clearInterval(timer);
+
+        let audioToPlay;
+
+        if (option === correctOptionParam) {
+            audioToPlay = correctAudio; // Play correct audio
+            document.getElementById('option' + option).classList.add('correct');
+        } else {
+            audioToPlay = incorrectAudio; // Play incorrect audio
+            document.getElementById('option' + option).classList.add('wrong');
+            document.getElementById('option' + correctOptionParam).classList.add('correct');
+        }
+
+        hasSubmitted = true;
+
+        // Play the audio and only proceed to the next question once it finishes
+        audioToPlay.play();
+        audioToPlay.onended = function() {
+            // Submit the form and redirect to the next question after the audio finishes playing
+            document.getElementById('quizForm').submit();
+        };
+    }
+
+    // Function to handle 50-50 button click
+    function handleFiftyFifty() {
+        var fiftyFiftyBtn = document.getElementById('fiftyFiftyBtn');
+
+        // Disable the 50-50 button after it's used
+        fiftyFiftyBtn.disabled = true;
+
+        // Get all option elements
+        var options = ['A', 'B', 'C', 'D'];
+        var incorrectOptions = options.filter(function(option) {
+            return option !== correctOption;
+        });
+
+        // Shuffle the incorrect options array
+        incorrectOptions = shuffleArray(incorrectOptions);
+
+        // Select first two incorrect options to disable
+        var optionsToDisable = incorrectOptions.slice(0, 2);
+
+        // Disable the selected options
+        optionsToDisable.forEach(function(option) {
+            var optionElement = document.getElementById('option' + option);
+            optionElement.classList.add('disabled-option');
+        });
+
+        // Optional: Provide user feedback
+        var feedback = document.querySelector('.feedback');
+        feedback.textContent = "50-50 used: Two incorrect options have been removed.";
+        feedback.classList.add('feedback-info'); // Define this class in CSS if desired
+    }
+
+    // Utility function to shuffle an array
+    function shuffleArray(array) {
+        for (var i = array.length - 1; i > 0; i--) {
+            var j = Math.floor(Math.random() * (i + 1));
+            var temp = array[i];
+            array[i] = array[j];
+            array[j] = temp;
+        }
+        return array;
+    }
+
+    // Prevent 50-50 from being used after submission
+    document.getElementById('quizForm').addEventListener('submit', function() {
+        var fiftyFiftyBtn = document.getElementById('fiftyFiftyBtn');
+        fiftyFiftyBtn.disabled = true;
+    });
+
+    startTimer();
+    </script>
+
+</body>
+</html>
